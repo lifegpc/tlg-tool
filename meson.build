@@ -29,6 +29,8 @@ executable('tlg',
         'src/main.cpp',
         'src/file_stream.cpp',
         'src/file_stream.h',
+        'src/dict_file.cpp',
+        'src/dict_file.h',
     ),
     dependencies: deps,
 )

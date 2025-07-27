@@ -7,6 +7,7 @@
 #include "fileop.h"
 #include "str_util.h"
 #include <stdexcept>
+#include "dict_file.h"
 
 typedef struct TlgPic {
     uint32_t width;
@@ -142,7 +143,7 @@ TlgPic loadPng(std::string input) {
     }
     png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
     fclose(fp);
-    //convertBgrToRgb(pic);
+    convertBgrToRgb(pic);
     return pic;
 }
 
@@ -152,9 +153,14 @@ void printHelp() {
     printf("Options:\n");
     printf("  -h, --help        Show this help message\n");
     printf("  -v, --version [v] Specifiy tlg version when encoding. Default: 5. Available values: 5, 6\n");
+    printf("  -t, --tags <key>=<value>\n");
+    printf("                    Specify tags for the input file. Can be used multiple times.\n");
+    printf("  -p, --tag-path <path>\n");
+    printf("                    Specify a file path to load tags from. The file should contain key=value pairs.\n");
 }
 
 int main(int argc, char* argv[]) {
+    SetConsoleOutputCP(CP_UTF8);
     int wargc;
     char** wargv;
     bool haveWargv = wchar_util::getArgv(wargv, wargc);
@@ -165,14 +171,17 @@ int main(int argc, char* argv[]) {
     struct option options[] = {
         {"help", 0, nullptr, 'h'},
         {"version", 1, nullptr, 'v'},
+        {"tags", 1, nullptr, 't'},
+        {"tag-path", 1, nullptr, 'p'},
         nullptr,
     };
     int opt;
-    const char* shortopt = "-hv:";
+    const char* shortopt = "-hv:t:p:";
     std::string input;
     std::string output;
     // Default TLG version
     int tlgVersion = 5;
+    std::map<std::string, std::string> input_tags;
     while ((opt = getopt_long(argc, argv, shortopt, options, nullptr)) != -1) {
         switch (opt) {
         case 'h':
@@ -189,13 +198,38 @@ int main(int argc, char* argv[]) {
                 }
             }
             break;
+        case 't':
+            if (optarg) {
+                auto re = str_util::str_splitv(optarg, "=", 2);
+                if (re.size() == 2) {
+                    input_tags[re[0]] = re[1];
+                } else {
+                    fprintf(stderr, "Invalid tag format: %s. Expected format: key=value\n", optarg);
+                    if (haveWargv) wchar_util::freeArgv(wargv, wargc);
+                    return 1;
+                }
+            }
+            break;
+        case 'p':
+            if (optarg) {
+                DictFile dict(optarg);
+                if (dict.HasError) {
+                    fprintf(stderr, "Failed to load tags from file: %s\n", optarg);
+                    if (haveWargv) wchar_util::freeArgv(wargv, wargc);
+                    return 1;
+                }
+                for (const auto& tag : dict.maps) {
+                    input_tags[tag.first] = tag.second;
+                }
+            }
+            break;
         case 1:
             if (input.empty()) {
                 input = optarg;
             } else if (output.empty()) {
                 output = optarg;
             } else {
-                fprintf(stderr, "Too many arguments. Expected: <input> <output>\n");
+                fprintf(stderr, "Too many arguments. Expected: <input> [<output>]\n");
                 if (haveWargv) wchar_util::freeArgv(wargv, wargc);
                 return 1;
             }
@@ -226,11 +260,12 @@ int main(int argc, char* argv[]) {
             }
             TlgPic pic;
             memset(&pic, 0, sizeof(TlgPic));
+            std::map<std::string, std::string> tags;
             auto re = TVPLoadTLG(
                 &pic,
                 tlg_pic_size_callback,
                 tlg_pic_buf_callback,
-                nullptr, // No tags needed for decoding
+                &tags,
                 &f
             );
             if (re == -1) {
@@ -239,12 +274,33 @@ int main(int argc, char* argv[]) {
             convertBgrToRgb(pic);
             savePng(pic, output.empty() ? fileop::filename(input) + ".png" : output);
             destory_tlg_pic(pic);
+            if (!tags.empty()) {
+                auto f = fileop::fopen(fileop::filename(output.empty()? input : output) + ".tags", "wb");
+                if (!f) {
+                    throw std::runtime_error("Failed to open output file for tags: " + output);
+                }
+                for (const auto& tag : tags) {
+                    fprintf(f, "%s=%s\n", tag.first.c_str(), tag.second.c_str());
+                }
+                fclose(f);
+            }
         } else {
             TlgPic pic = loadPng(input);
             if (pic.width == 0 || pic.height == 0 || pic.data == nullptr) {
                 throw std::runtime_error("Invalid PNG file: " + input);
             }
             auto f = FileStream(output.empty() ? fileop::filename(input) + ".tlg" : output, "wb");
+            std::map<std::string, std::string> tags;
+            auto tags_path = fileop::filename(input) + ".tags";
+            if (fileop::exists(tags_path)) {
+                DictFile dict(tags_path);
+                if (!dict.HasError) {
+                    tags = dict.maps;
+                }
+            }
+            for (const auto& tag : input_tags) {
+                tags[tag.first] = tag.second;
+            }
             auto re = TVPSaveTLG(
                 &f,
                 tlgVersion == 5 ? 0 : 1, // TLG version
@@ -253,7 +309,7 @@ int main(int argc, char* argv[]) {
                 pic.colors,
                 &pic,
                 tlg_pic_buf_callback,
-                nullptr
+                &tags
             );
             if (re == -1) {
                 throw std::runtime_error("Failed to save TLG file: " + output);
